@@ -1,0 +1,715 @@
+---
+title: "STA 141A Final Project"
+author: "Amirta Balakrishnan"
+date: "2026-03-12"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+-   Discussed with Krisha Bhat
+
+## Abstract
+
+This project analyzes wildfire patterns in the United States.
+The goal is to develop models to predict the probability that a notable fire will occur in the following month.
+The dataset contains information about wildfires including information on fire size, location, and discovery date.
+In this project, fires larger than 300 acres are defined as notable fires.
+The data is aggregated into a panel dataset that is converted into 1° by 1° grid cells.
+These grid cells are based on longitude and latitude and monthly time periods.
+Spatial and temporal predictors such as geographic location and cyclic month encodings are constructed to understand how space and seasons influence wildfire activity.
+
+Two predictive models are trained using these features.
+The baseline model is a logistic regression model.
+The second model, neural network, is used to capture more complex nonlinear relationships.
+The performance of the models is evaluated using the Area Under the Curve (AUC) metric.
+The modeling shows that the neural network achieves higher AUC values.
+This indicates that it is able to more accurately predict wildfire activity.
+
+Overall, the results demonstrate that incorporating spatial, seasonal, and historical wildfire information can help predict the probability of notable wildfires in the United States.
+
+## Introduction
+
+The dataset used for this project is a database of 1.88 million wildfires that occurred across the United States from 1992 to 2015.
+Each record in this dataset represents an individual fire event and includes information about when and where the fire was discovered, as well as characteristics such as the size of the fire.
+It includes information about ignition locations, discovery dates, containment dates, and final burned area.
+For this project, the relevant fields used are FIRE_YEAR, DISCOVERY_DOY, FIRE_SIZE, LATITUDE, LONGITUDE, and STATE.
+These fields were selected to be able to analyze wildfires based on spatial and temporal patterns.
+These fields are used to extract specific information like Month and Year to gain an even more thorough understanding on what factors infleunce wildfire activity.
+These variables are also used as predictors to train the models to analyze fire activity.
+
+The goal of this project is to predict the probability that at least one notable fire will occur in the next month.
+In this, a notable fire is denoted by fires that are larger than 300 acres.
+First, the data is preprocessed so that the rare fire data is filtered and cleaned to include information that is relevant to the project.
+Information such as spatial and seasonal data will be more focused on in this process.
+Exploratory Data Analysis will provide visual plots that display the relationship predictors have with each other.
+It will also reveal other patterns in the data.
+This step is necessary in order to underestand the motivation behind the predictors that are chosen.
+Next, in the modeling section, the data will be shaped in order to be able to train a model using it.
+This step involves changing factors into binary values so that the model can be trained using it.
+The next section, model fitting, is where the data is trained by the logistic regression model and a neural network model.
+These models will be compared using AUC to see which model is able to predict the risk of a notable fire more accurately.
+The output of these two models will also be analyzed.
+Finally, the summary section will display the overall analysis of the project.
+
+## Data Preprocessing
+
+In this stage, the raw data is transformed into a panel that is indexed by grid cell and month.
+First, the data is filtered by notable fires.
+A notable fire is defined as any fire that spans greater than 30 acres.
+
+This includes filtering notable fires, constructing 1° by 1° latitude–longitude bins, defining monthly time indices, aggregating fire counts and burned area to grid-cell–months, and creating the binary outcome indicating whether a notable fire occurs in the next month.
+Additional predictors such as cyclic month encodings and rolling sums of recent fire counts and burned area are engineered to capture seasonality and fire history.
+
+```{r echo = FALSE}
+library(readr)
+wildfires <- read_csv("wildfires_sample_100k.csv")
+```
+
+```{r echo = FALSE}
+suppressMessages({
+    library(dplyr)
+    library(ggplot2)
+    library(tidyverse)
+    library(slider)
+    library(pROC)
+    library(xgboost)
+    library(Matrix)
+    library(purrr)
+    library(nnet)
+})
+```
+
+```{r echo = FALSE}
+wildfires <- read_csv("wildfires_sample_100k.csv") %>% 
+  select(FIRE_YEAR, DISCOVERY_DOY, FIRE_SIZE, LATITUDE, LONGITUDE, STATE) %>%
+  mutate(STATE = as.factor(STATE))
+glimpse(wildfires)
+```
+
+Here the columns: FIRE_YEAR, DISCOVERY_DOY, FIRE_SIZE, LATITUDE, LONGITUDE, and STATE are selected.
+STATE is converted to a factor so that it can be treated as a categorical predictor in the modeling section.
+The specific variables are chosen because they each provide insight into the location of the fire and the size of the fire in that location.
+The Discovery Date of Year variable is chosen in order to be able to extract Month and Year from it.
+The glimpse output provides a concise summary of the dataset’s structure, confirming that each variable has the expected type (numeric for year, day of year, size, latitude, longitude; factor for state).
+
+```{r echo = FALSE}
+fires <- wildfires %>% 
+    mutate(FIRE_DATE = as.Date(paste(FIRE_YEAR, DISCOVERY_DOY, sep = "-"), format = "%Y-%j"),
+         YEAR = year(FIRE_DATE),
+         MONTH = month(FIRE_DATE))
+head(fires)
+```
+
+Next, to be able to understand when exactly the fire occured, this step creates a Date variable, FIRE_DATE, by combining FIRE_YEAR and DISCOVERY_DOY.
+From this date, the year and month of the fire are extracted.
+The resulting YEAR and MONTH are created in order to be able to get insight about when the fire occurred and what months/years tend to have more fires.
+
+```{r echo = FALSE}
+notable_fires <- fires %>%
+  filter(FIRE_SIZE >= 300)
+
+tibble(
+  dataset = c("All fires", "Notable fires"),
+  count = c(
+    nrow(fires),
+    nrow(notable_fires)
+  )
+)
+```
+
+This step defines the variable notable_fires.
+This is where the requirement for a notable fire is defined in the project.
+A notable fires is any fire greater than or equal to 300 acres.
+In this data, out of the 100,000 total fires, 1,381 fires are notable.
+This means that only 0.013% of the total data is classified as a notable fire.
+This means that a notable fires is a relatively rare event that does not happen often.
+Understanding this, helps process the plots later in the project.
+Since notable fires are not a common event, this can lead to the data being skewed to the right with most months having lower fire counts and only a few months having higher fire counts.
+
+```{r echo = FALSE}
+notable_fires <- notable_fires %>%
+  mutate(
+    lat_bin = floor(LATITUDE),
+    lon_bin = floor(LONGITUDE),
+    ym = YEAR * 100 + MONTH,
+  )
+grid_month_fire <- notable_fires %>%
+  group_by(lat_bin, lon_bin, ym) %>%
+  summarise(
+    n_fires = n(),
+    fire_this_month = as.integer(n_fires > 0),
+    .groups = "drop"
+  )
+head(grid_month_fire)
+```
+
+```{r echo = FALSE}
+dim(grid_month_fire)
+tibble(
+  variable = names(grid_month_fire),
+  class = sapply(grid_month_fire, class)
+)
+```
+
+To define spatial units, the longitude and latitude of each fire is mapped into a 1° by 1° grid cell.
+The variables lat_bin and lon_bin are integers that define the spatial grid.
+This is beneficial for training the model based on geographic locations as the location is now a numeric value rather than a categorical value.
+The variable ym defines the year-month pair as an integer, which also helps obtain the same purpose.
+In the table above, n_fires is defined as the count of the number of notable fires in a specific grid cell and month.
+fire_this_month is a binary value which will be set to 1 if there is a notable fire and 0 otherwise.
+
+Since these grid cells can intersect multiple states, each cell is assigned to the state that appears the most frequently among notable fires within that cell.
+
+```{r echo = FALSE}
+mode_state <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+grid_state <- notable_fires %>%
+  group_by(lat_bin, lon_bin) %>%
+  summarise(
+    state = mode_state(STATE),
+    .groups = "drop"
+  )
+
+all_grids <- grid_state
+
+start_date <- ymd(paste0(min(grid_month_fire$ym) %/% 100, "-", min(grid_month_fire$ym) %% 100, "-01"))
+end_date   <- ymd(paste0(max(grid_month_fire$ym) %/% 100, "-", max(grid_month_fire$ym) %% 100, "-01"))
+all_months <- tibble(date = seq.Date(start_date, end_date, by = "month")) %>%
+  mutate(year = year(date), month = month(date), ym = year * 100 + month) %>%
+  select(ym, year, month)
+
+
+panel <- crossing(all_grids, all_months) %>%
+  left_join(grid_month_fire, by = c("lat_bin", "lon_bin", "ym")) %>%
+  mutate(
+    n_fires = replace_na(n_fires, 0),
+    fire_this_month = replace_na(fire_this_month, 0)
+  )
+head(panel)
+```
+
+The table above displays a full panel of grid cells and months along with the state the grid is assigned to.
+The crossing function is used in order to create every combination of grid cell and month.
+This helps ensure a balanced panel.
+A left join is performed to attach n_fires and fire_this_month to this full grid that already has the latitude, longitude, state, year, and month information.
+
+In order to train the models to predict the probability of a notable fire occurring in the next month, the prediction outcome needs to be defined.
+Here, the prediction outcome is stored in the y_next variable.
+It is defined as whether a notable fire occurs in the next month within the same grid cell.
+
+```{r echo = FALSE}
+# Prediction Target
+panel <- panel %>%
+  arrange(lat_bin, lon_bin, ym) %>%
+  group_by(lat_bin, lon_bin) %>%
+  mutate(
+    y_next = lead(fire_this_month, n = 1L)
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(y_next))
+table(panel$y_next)
+```
+
+The 2 x 2 table above shows the summary of the outcome variable.
+An outcome of 1 means that there is a notable fire in the next month, and 0 means that there is no notable fire in the next month.
+In this data, there are 1,311 cells that have a notable fires in the next month and 146,265 cells that do not have a notable fire in the next month.
+This y_next variable is necessary as this is what the model will use to predict the probability of a notable fire in the next month.
+
+```{r echo = FALSE}
+panel %>% select(state) %>% summary()
+```
+
+This table is displayed to show how many notable fires exist in each state.
+A summary of this information is presented in the table above.
+This table helps visualize which states tend to have more notable fires.
+In this case,states such as California on the West Coast and Texas in the central region tend to experience a higher number of notable wildfires.
+
+Seasonality needs to be represented using a cyclic encoding of the months.
+This is necessary because in a year the months December and January are close together.
+However, numerically, the numbers 1 and 12 are far from each other.
+In order to capture the logic that the first month and twelfth month are close together, a cyclic representation using sin and cosine is necessary.
+
+```{r echo = FALSE}
+# Seasonality: Cyclic Month Encoding
+panel <- panel %>%
+  mutate(
+    month_sin = sin(2 * pi * month / 12),
+    month_cos = cos(2 * pi * month / 12)
+  )
+panel %>% select(month_sin, month_cos) %>% head()
+```
+
+Here, the variables month_sin and month_cos map the months (1-12) to points on the unit circle.
+This enforces the cyclic nature to solve the problem presented above.
+
+To incorporate information about the burned area, the total notable burned area in each grid-cell-month is computed.
+In this, lagged and rolling fire activity is also taken to learn more about the nature of the fires.
+
+```{r echo = FALSE}
+grid_fire_size <- notable_fires %>%
+  group_by(lat_bin, lon_bin, ym) %>%
+  summarise(
+    fire_size = sum(FIRE_SIZE, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+panel <- panel %>%
+  left_join(grid_fire_size, by = c("lat_bin","lon_bin","ym")) %>%
+  mutate(
+    fire_size = coalesce(fire_size, 0))
+
+panel <- panel %>%
+  arrange(lat_bin, lon_bin, ym) %>%
+  group_by(lat_bin, lon_bin) %>%
+  mutate(
+    fire_lag12 = lag(n_fires, 12),
+    fire_roll3 = n_fires + lag(n_fires,1) + lag(n_fires,2),
+    fire_roll12 =
+      n_fires + lag(n_fires,1) + lag(n_fires,2) + lag(n_fires,3) +
+      lag(n_fires,4) + lag(n_fires,5) + lag(n_fires,6) +
+      lag(n_fires,7) + lag(n_fires,8) + lag(n_fires,9) +
+      lag(n_fires,10) + lag(n_fires,11),
+    size_roll3 = fire_size + lag(fire_size,1) + lag(fire_size,2),
+    size_roll12 =
+      fire_size + lag(fire_size,1) + lag(fire_size,2) + lag(fire_size,3) +
+      lag(fire_size,4) + lag(fire_size,5) + lag(fire_size,6) +
+      lag(fire_size,7) + lag(fire_size,8) + lag(fire_size,9) +
+      lag(fire_size,10) + lag(fire_size,11)
+  ) %>%
+  ungroup()
+
+panel %>% 
+  select(n_fires, fire_lag12, fire_roll3, fire_roll12,
+         size_roll3, size_roll12) %>%
+  summary()
+```
+
+The predictors defining fire lag and fire roll are defined as the following: A lag variable takes the value of a variable from exactly a fixed time in the past.
+For example fire_lag12 will look at the number of notable fires exactly 12 months prior to the current date.
+A roll variable combines values across a window of recent months.
+For example fire_roll3 will calculate the sum of notable fires from the previous 2 months and the current month.
+fire_roll 12 will do the same thing but will sum across a total 12 month window.
+The size roll variables will have the same behavior but instead will calculate the total notable burned area.
+size_roll3 will calculate the total burned area over 3 months and size_roll12 will calculate the total burned area over 12 months.
+
+These variables give important insight into temporal patterns in wildfire activity and persistence in wildfire activity.
+Lag variables capture how conditions from a specific point in the past may influence current wildfire behavior.
+Roll variables summarize wildfire patterns over a continuous period of time.
+
+Overall, all of these predictor variables will help capture both short-term and long-term wildfire activity patterns in each grid cell.
+
+### Final Summary Table
+
+```{r echo = FALSE}
+dataset_summary <- tibble(
+  n_rows = nrow(panel),
+  year_min = min(panel$year),
+  year_max = max(panel$year),
+  spatial_unit = "1° x 1° lat-lon grid (floor bins)",
+  temporal_unit = "monthly",
+  outcome = "y_next = 1 if any notable fire occurs in grid cell next month",
+  predictors = "lat_bin, lon_bin, state, month_cos, month_sin, year,
+    n_fires, fire_lag12, fire_roll3, fire_roll12,
+    size_roll3, size_roll12")
+dataset_summary
+```
+
+This summary table reports what the final modeling dataset will look like.
+This table displays the number of rows, temporal coverage, spatial and temporal units, the definition of the outcome variables, and the list of all predictors that will be used in modeling.
+
+## Exploratory Data Analysis
+
+EDA is conducted on the panel dataset to understand the spatial and temporal patterns of notable wildfire occurrences.
+This helps better understand the effect of the predictors that are used in the modeling section.
+
+First, to gain an understanding on how wildfire patterns change across state, a map of the U.S. defined by the grids created in the data preprocessing is plotted.
+
+```{r echo = FALSE}
+eda_spatial <- panel %>%
+  group_by(lat_bin, lon_bin) %>%
+  summarise(
+    fire_rate = mean(y_next, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ggplot(eda_spatial, aes(x = lon_bin, y = lat_bin, fill = fire_rate)) +
+  coord_quickmap(xlim = c(-125, -65), ylim = c(25, 50)) + 
+  geom_tile() +
+  labs(
+    title = "Spatial pattern: Mean next-month notable-fire rate by grid cell",
+    x = "Longitude bin (floor)",
+    y = "Latitude bin (floor)",
+    fill = "Mean y_next"
+  )
+```
+
+This is a map of the United States defined by the grid cells.
+More populated areas indicate that there is a higher likelihood of notable fires in that area in the upcoming month.
+According to this plot, states in the west coast and midwest are shown to have a higher risk of notable fires.
+This is shown by the more populated grids in these areas.
+Lighter colors also indicate higher probabilities of fires.
+Some lighter blue grids are seeen in central regions which also emphasizes that these regions see more fires and are therefore at a risk of a notable fire in the next month.
+The east coast seems to have a lower risk of having notable fires.
+However, Florida seems to have some lighter color grids indicating that there may be risks of notable fire in Florida as well.
+Since Florida is also known to have higher temperatures than some other eastern states, this can emphasize that states with higher temperatures may be at more risk of seeing notable fires.
+
+```{r echo = FALSE, fig.height=8, fig.width=7}
+state_summary <- panel %>%
+  group_by(state) %>%
+  summarise(
+    avg_fire_count = mean(n_fires, na.rm = TRUE)
+  ) %>%
+  arrange(desc(avg_fire_count))
+
+ggplot(state_summary,
+       aes(x = reorder(state, avg_fire_count),
+           y = avg_fire_count)) +
+  geom_col(fill = "darkred") +
+  coord_flip() +
+  labs(
+    title = "Average Monthly Fire Count by State",
+    x = "State",
+    y = "Average Fires per Grid-Month"
+  ) +
+  theme_minimal()
+```
+
+This bar chart highlights the map above by reporting the average number of fires per grid cell per month for each state.
+Each bar represents a state.
+The length of the bar indicates the average monthly fire count calculated across all grid cells and months in that state.
+Here, states that are in the western and central areas such as California and Oklahoma are shown to have higher averages than states in the east like New York.
+This chart highlights the same information that the plot displaying the map of the U.S. did.
+This emphasizes how geographical regions help understand wildfire activities.
+
+```{r echo = FALSE}
+eda_month <- panel %>%
+  group_by(month) %>%
+  summarise(
+    mean_y_next = mean(y_next, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ggplot(eda_month, aes(x = month, y = mean_y_next)) +
+  geom_line() +
+  geom_point() +
+  scale_x_continuous(breaks = 1:12) +
+  labs(
+    title = "Seasonality: Mean probability of a notable fire in the next month",
+    x = "Month",
+    y = "Mean of y_next"
+  ) +
+  theme_minimal()
+```
+
+This plot examines seasonality by averaging the outcome over months.
+This line graph reveals how the average probability of a notable fire in the next month varies across months of the year.
+This plot shows that there is an elevated risk of a fire during months 5 - 8 which are May - October.
+These months are late spring to early fall, which is typically when the temperature is the highest.
+This suggests that hotter months tend to have a higher risk of having fires.
+This seasonal pattern also emphasizes the motivation behind having cyclic month encodings.
+
+In order to better understand how various predictors differ between fire and non-fire outcomes, the relationship between the total burned area for a notable fire in a month and the next month fire occurrence is plotted as a box plot.
+
+```{r echo = FALSE}
+panel_fire_predictors <- panel %>%
+  select(state, month, y_next, fire_size)
+
+ggplot(panel_fire_predictors, 
+       aes(x = factor(y_next), y = fire_size, fill = factor(y_next))) +
+  geom_boxplot() +
+  scale_y_log10() +
+  scale_x_discrete(labels = c("No Fire Next Month", "Fire Next Month")) +
+  labs(title = "Comparison of Fire Size by Next-Month Notable Fire (log scale)",
+       x = "Next-Month Notable Fire?",
+       y = "Current Month Total Fire Size (log acres)",
+       fill = "Next-Month Fire") +
+  theme_minimal()
+```
+
+This box-plot on the left displays how fire size affects when there is no fire predicted.
+This is the label 0 in the y_next variable.
+The plot on the right shows how the fire size affects if there is a fire next month.
+This is shown by the 1 on the y_next variable.
+In this plot, the median and interquartile ranges are similar, however the "Fire Next Month": group tends to have slightly higher medians and ranges than the "No fire Next Month" group.
+This suggests that months with larger current burned areas are most likely followed by another notable fire in the next month.
+The ranges for the two groups are probably similar because the amount of notable fires is small.
+So even if there is a large fire the month prior, there will not always be a notable fire in the following month.
+
+To visualize trends over time, the mean probability of a notable fire next month is plotted against years from 1992 - 2015.
+
+```{r echo = FALSE}
+year_summary <- panel %>%
+  group_by(year) %>%
+  summarise(
+    notable_fire_rate = mean(y_next, na.rm = TRUE)
+  )
+
+ggplot(year_summary, aes(x = factor(year), y = notable_fire_rate)) +
+  geom_col(fill = "darkred") +
+  labs(
+    title = "Probability of Notable Wildfires by Year",
+    x = "Year",
+    y = "Mean Probability of a Notable Fire Next Month"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+This plot shows that the risk of notable fires every year is roughly stable, with some years having less risk and some years like 2006 having higher risks.
+This is probably because of changes in climate or land management.
+
+Overall, EDA helped identify how predictors interact with each other and influence wildfire activities.
+Geography and seasonality both influence fire activities with states and seasons with hotter climates having more risk of fires.
+The last plot shows that sometimes random environmental factors can have certain years have more fires.
+This is useful to understand why these predictors are needed to help train the models.
+
+## Modeling
+
+This section describes the specification and justification of the predictive models.
+For this project a logistic regression model is chosen as a baseline and a neural network model is chosen as a better alternative.
+Both of these models are trained on the same set of features that are derived from the panel dataset in the Data Pre-processing section.
+
+The output below shows how the modeling dataset is constructed.
+
+```{r echo = FALSE}
+model_df <- panel %>%
+  mutate(y_next = factor(y_next, levels = c(0, 1))) %>%
+  select(y_next, lat_bin, lon_bin, state, 
+         month_cos, month_sin, year,
+         n_fires, fire_lag12, fire_roll3, fire_roll12, size_roll3, size_roll12)
+glimpse(model_df)
+```
+
+The features the models are trained on are y_next, lat_bin, lon_bin, state, month_cos, month_sin, year, n_fires, and the fire lag and roll variables.
+y_next is converted to be a binary where 1 represents a fire in the next month and 0 otherwise.
+
+### Baseline Model: Logistic Regression
+
+The baseline model chosen to evaluate this dataset is a logistic regression model.
+A Logistic regression models the probability of a binary outcome as a function of predictor variables.
+In this case, the binary outcome is whether there will be a fire next month.
+The model will predict this based on the predictors that are defined.
+The model is defined by its predictors as $$
+\log \left(\frac{1 - P(y_{next}=1)}{P(y_{next}=1)}\right)
+=
+\beta_0 + \beta_1 \text{lat\_bin} + \beta_2 \text{lon\_bin} + \cdots + \beta_p X_p .
+$$A logistic regression model was chosen because it directly models the probability of a binary outcome as a function of predictors.
+It also provides coefficients that can be interpreted.
+This helps understand how each predictor affects the likelihood of a wildfire.
+
+Logistic regression assumes a linear relationship between the predictors and the log-odds of the outcome.
+This outcome is simple which makes it a good baseline model.
+However, it may also limit the model's ability to capture nonlinear relationships and nuances between wildfire activity and environmental predictors.
+
+### Neural Network
+
+The second model that was chosen is a neural network model.
+This model is also trained on the same feature set as the logistic regression model.
+A neural network consists of an input layer corresponding to the predictor variables.
+It has one or more hidden layers that help capture nonlinear relationships between features.
+(<https://medium.com/the-modern-scientist/unlocking-complexities-the-role-of-nonlinear-relationships-and-hidden-layers-in-neural-networks-fca9631fd2fd>. Finally, it has an output layer that produces the final predicted probability of a wildfire occurring in the next month. The hidden layer has weighed factors that help the model learn complex patterns and differentiate between features. These 3 layers work together to transform the predictors in the input layer by applying weights and nonlinear activation functions. The output layer will convert this information into a predicted probability of wildfire occurrence in the next month.
+
+This model was chosen because it is a simple and standard deep learning model.
+It can learn interactions between non linear numerical predictors.
+Since, R also has a readily available package via the nnet package, it is easy to implement.
+(<https://cran.r-project.org/web/packages/nnet/nnet.pdf>)
+
+### Model Evaluation
+
+The performance of the models is evaluated using Area Under Curve (AUC).
+AUC is particularly useful for this problem because wildfire occurrence is relatively rare, meaning the dataset is imbalanced.
+The AUC metric measures how well the model can distinguish between months where a wildfire occurs and months where it does not.
+
+Comparing these metrics between the logistic regression model and the neural network helps determine whether the additional flexibility of the neural network improves predictive performance.
+Currently, the neural network model is expected to outperform the logistic regression model.
+
+## Model Fitting
+
+This section describes how the models are trained and evaluated.
+Since the data is organized as a time-based panel, a time-aware cross-validation strategy is used for training the models.
+This is done to ensure that both of the models are always trained on past data rather than future data.
+They are validated on future data in order to see how the model would perform in practice.
+
+First, the dataset is sorted by year so it can be split into training and testing sets.
+For each fold, the model is trained using all observations up to a specified year.
+For example the year 1995 would be trained on 1993-1995, and the model would evaluate on 1996.
+The minimum amount of years trained on each fold is 3.
+
+For each fold, both the logistic regression model and the neural network model are trained using the same set of predictors.
+These were the predictors mentioned in the previous section.
+
+After fitting the models, the predictions are generated for the validation year.
+These predicted probabilities are evaluated using AUC.
+The cross-validation results are summarized by computing AUC for both models across multiple validation years.
+The graph below shows the difference in performance of both of the models.
+
+After evaluating the models, the final versions of both models are fit using the full training dataset.
+
+```{r echo = FALSE}
+
+years_sorted <- sort(unique(model_df$year))
+min_train_years <- 3
+
+feat_formula <- y_next ~ lat_bin + lon_bin + month_cos + month_sin + fire_roll12
+features <- c("month_cos", "month_sin", "lat_bin", "lon_bin", "fire_roll12")
+target <- "y_next"
+
+fold_results <- tibble(
+    train_end_year = years_sorted[(min_train_years):(length(years_sorted) - 2)],
+    valid_year = years_sorted[(min_train_years + 1):(length(years_sorted) - 1)]
+) %>%
+  mutate(
+
+    # Logistic Regression
+    auc_glm = map2_dbl(train_end_year, valid_year, function(tr_end, va_year) {
+
+      train <- model_df %>% filter(year <= tr_end)
+      valid <- model_df %>% filter(year == va_year)
+
+    
+
+      fit <- glm(feat_formula, data = train, family = binomial)
+
+      p_hat <- predict(fit, newdata = valid, type = "response")
+
+      auc(pROC::roc(valid[[target]], p_hat))
+
+
+    }),
+
+    # Neural Network
+    auc_nn = map2_dbl(train_end_year, valid_year, function(tr_end, va_year) {
+
+      train <- model_df %>% filter(year <= tr_end)
+      valid <- model_df %>% filter(year == va_year)
+
+ 
+
+      fit <- nnet(
+        feat_formula,
+        data = train,
+        size = 5,
+        decay = 0.01,
+        maxit = 200,
+        trace = FALSE
+      )
+
+      p_hat <- predict(fit, newdata = valid, type = "raw")
+
+      auc(pROC::roc(valid[[target]], p_hat))
+
+   
+    })
+  )
+fold_results
+
+```
+
+```{r echo = FALSE}
+fold_long <- fold_results %>%
+  pivot_longer(
+    cols = c(auc_glm, auc_nn),
+    names_to = "model",
+    values_to = "auc"
+  )
+
+ggplot(fold_long, aes(x = valid_year, y = auc, color = model)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  labs(
+    title = "Time-aware cross-validation diagnostic: AUC by validation year",
+    x = "Validation year",
+    y = "AUC",
+    color = "Model"
+  ) + 
+  theme_minimal()
+```
+
+```{r echo = FALSE}
+cat('Overall, The Neural Network model outperforms logistic regression in AUC by ', 
+    round(mean(fold_results$auc_nn) / mean(fold_results$auc_glm) * 100, 2) - 100, "%", sep= '')
+```
+
+This plot shows how the performance of the two models differs over various validation years.
+Each point in this graph aligns with a fold that the model was trained on.
+The x-axis represents the validation year while the y-axis represents the AUC.
+Higher values indicate a more accurate prediction between fire and non-fire grid-months.
+The red line represents the outcome of the logistic regression model and the blue line represents the neural network.
+
+Looking at this graph, across most years, the neural network achieves an equal or higher AUC than logistic regression.
+This re-emphasizes the fact that a neural network should be better able to understand the non-linearity present in the data.
+Both models show that there is variability between years.
+
+However, when running the models multiple times, occasionally the neural network model performs slightly below the logistic regression.
+This outcome is very rare, so the reason is unclear.
+This may be because depending on the data that is chosen by the model to train, some may lead to the logistic regression performing slightly better than the neural network.
+Overall, the neural network does outperform the logistic regression.
+
+```{r echo = FALSE}
+train_full <- model_df %>% drop_na()
+```
+
+```{r echo = FALSE}
+glm_final <- glm(feat_formula, data = train_full, family = binomial)
+
+summary(glm_final)
+```
+
+This is the output of the final logistic regression model that was trained on the full dataset.
+It has an intercept of -4.287.
+This is the baseline prediction of a notable fire in the next month when all of the predictors are zero.
+This number indicates a very low baseline probability Lat_bin has a small negative coefficient.
+This indicates that moving to a bin with a higher latitude decreases the probability of a notable fire.
+This indicates that there is a lower fire risk in more northern locations.
+Lon_bin has a coefficient that is very close to 0.
+This is not very significant.
+This suggests that lon_bin does not strongly affect the model on its own.
+Month_cos and Month_sin seem to both be significant.
+They have a p value of 2e-16 and 1e-10 respectively.
+This confirms that both of these variables together have a strong influence on predicting which parts of the annual cycle are associated with increased or decreased fire risk.
+Fire_roll12 also has a strongly significant coefficient.
+This indicates that if there is a higher cumulative notable fire count over the current and previous 11 months in a grid cell, the odds of a notable fire in the next month is very high.
+
+```{r echo = FALSE}
+nn_final <- nnet(
+  feat_formula,
+  data = train_full,
+  size = 5,
+  decay = 0.01,
+  maxit = 200,
+  trace = FALSE
+)
+
+nn_predictions <- predict(nn_final, newdata = train_full, type = "raw")
+
+head(nn_predictions)
+```
+
+This is the output of the final neural network model that was trained on the full dataset.
+Only the summary is printed above so this is just the first six predicted probabilities.
+Each value is the model's estimate for a specific grid cell month.
+This is the estimate of the probability that a notable fire will occur in that grid cell in the following month.
+For example, the first observation has a predicted probability of 2.4% while the third has a probability of 5.4%.
+
+From these 6 outputs, it can be noticed that the probabilities given by the model are relatively low.
+This re-emphasizes that notable fires are relatively rare events.
+
+## Summary
+
+This project shows that notable fires are highly uneven across space and time in the United States.
+Spatial maps of the average next-month fire probability show that there are higher risks in western and central states.
+This shows that geography is an important factor in predicting risk.
+The seasonal plot shows that the probability of a notable fire is higher in months of the year with a higher temperature.
+This also confirms that strong seasonality aligns with known fire seasons.
+
+The predictive models capture these patterns by combining spatial and seasonal information as predictors.
+The logistic regression model links each predictor to the probability of a fire occurring in the next month.
+The neural network uses the same predictors but is able to understand the subtle relationships and factors better to predict the probability of a fire occurring.
+When comparing the final results of the models, the neural network is able to more accurately predict the risks of a fire.
+This is shown by the fact that it has a higher AUC value than the logistic regression models.
+Overall, these models show that incorporating geographic and seasonal information can help predict the risk of notable fires in the United States.
